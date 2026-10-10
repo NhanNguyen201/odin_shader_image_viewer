@@ -44,10 +44,10 @@ void main() {
     vec2 uv = fragTexCoord.xy / screenSize.xy;
     uv = uv * 2. - 1.;
     uv.x *= screenSize.x / screenSize.y;
-    float get_noise = noise(vec2(mult_uv(uv.x)   + uTime * offset.x  , mult_uv(uv.y) + uTime * offset.y )  );
+    float get_noise = noise(vec2(mult_uv(uv.x * screenSize.x)   + uTime * offset.x  , mult_uv(uv.y * screenSize.y) + uTime * offset.y )  );
     
-    float mult =  sin(uTime * 2.75) * 0.5 + 0.5 ;
-
+    float mult =  sin(uTime * 0.75) * 0.5 + 0.5 ;
+    get_noise = exp(-pow(get_noise * dist / length(screenSize), 2.0) * 4.0);
     vec3 distorted = vec3(
        texel.rgb * 0.2 + texture(texture0, fragTexCoord + mult * get_noise  * offset ).rgb * 0.8
      

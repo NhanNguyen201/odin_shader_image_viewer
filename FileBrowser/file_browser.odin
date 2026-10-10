@@ -48,7 +48,7 @@ File_Browser :: struct {
 
 Entry :: struct {
     name:     string,                     // just the filename
-    full:     string,                     // full path
+    full:     cstring,                     // full path
     is_dir:   bool,
     size:     i64,
     mod_time: time.Time,
@@ -106,9 +106,9 @@ apply_dark_mode :: proc () {
 
 is_image_file :: proc(path: string) -> bool {
     ext := strings.to_lower(filepath.ext(path), context.temp_allocator)
-    return ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
-           ext == ".bmp" || ext == ".gif" || ext == ".tga" ||
-           ext == ".webp" || ext == ".hdr" || ext == ".psd"
+    return ext == ".png"  || ext == ".jpg"  || ext == ".jpeg" ||
+           ext == ".bmp"  || ext == ".tga"  || ext == ".gif"  ||
+           ext == ".psd"  || ext == ".hdr"  || ext == ".pic"
 }
 
 init_file_browser :: proc(start_path: string = "") -> File_Browser {
@@ -129,10 +129,9 @@ init_file_browser :: proc(start_path: string = "") -> File_Browser {
     }
     copy_to_buf(fb.current_path[:], path)
     // Default filter (empty = show all)
-    image_filter := ".jpg;.png;.jpeg;.webp"
-
+    image_filter := ".jpg;.png;.jpeg;.bmp;.tga;.gif"
     copy_to_buf(fb.filter_ext[:], image_filter)
-    
+
     return fb
 }
 
@@ -159,8 +158,8 @@ unload_preview :: proc(fb: ^File_Browser) {
         copy_to_buf(fb.preview_path[:], "")
     }
 }
+
 update_preview :: proc(fb: ^File_Browser) {
-    // Nothing selected
     if fb.active_index < 0 || fb.active_index >= i32(len(fb.entries)) {
         unload_preview(fb)
         return
@@ -168,28 +167,64 @@ update_preview :: proc(fb: ^File_Browser) {
 
     entry := fb.entries[fb.active_index]
 
-    // Only preview files (not directories)
-    if entry.is_dir || !is_image_file(entry.full) {
+    if entry.is_dir || !is_image_file(string(entry.full)) {
         unload_preview(fb)
         return
     }
 
-    // Already showing this image?
+    // Already showing this image? (compare content, not pointer)
     current_preview := buf_to_string(fb.preview_path[:])
-    if fb.has_preview && current_preview == entry.full {
+    if fb.has_preview && current_preview == string(entry.full) {
         return
     }
 
-    // Unload old one
     unload_preview(fb)
 
-    // Load new texture
-    tex := rl.LoadTexture(cstring(raw_data(entry.full)))
-    if tex.id != 0 {
-        fb.preview_texture = tex
-        fb.has_preview = true
-        copy_to_buf(fb.preview_path[:], entry.full)
+    // ---------- Robust loading ----------
+    path := string(entry.full)
+
+    // 1. Read file ourselves (avoids many path / unicode problems)
+    data, ok := os.read_entire_file(path, context.temp_allocator)
+    if !ok {
+        fmt.eprintf("Failed to read file: %s\n", path)
+        return
     }
+
+    // 2. Force lowercase extension so Raylib accepts .JPG / .PNG / etc.
+    ext := strings.to_lower(filepath.ext(path), context.temp_allocator)
+    if ext == "" {
+        fmt.eprintf("No extension: %s\n", path)
+        return
+    }
+    ext_cstr := strings.clone_to_cstring(ext, context.temp_allocator)
+
+    // 3. Load from memory
+    img := rl.LoadImageFromMemory(ext_cstr, raw_data(data), i32(len(data)))
+    if img.data == nil {
+        fmt.eprintf("Failed to decode image: %s (ext=%s)\n", path, ext)
+        return
+    }
+    defer rl.UnloadImage(img)
+
+    // 4. Resize very large images
+    max_size :: 1024
+    if img.width > max_size || img.height > max_size {
+        scale := f32(max_size) / f32(max(img.width, img.height))
+        new_w := i32(f32(img.width)  * scale)
+        new_h := i32(f32(img.height) * scale)
+        rl.ImageResize(&img, new_w, new_h)
+    }
+
+    // 5. Create texture
+    tex := rl.LoadTextureFromImage(img)
+    if tex.id == 0 {
+        fmt.eprintf("Failed to create texture: %s\n", path)
+        return
+    }
+
+    fb.preview_texture = tex
+    fb.has_preview = true
+    copy_to_buf(fb.preview_path[:], path)
 }
 // Call this every frame. Returns true when the user confirmed a selection.
 update_file_browser :: proc(fb: ^File_Browser) -> (selected: bool, path: string) {
@@ -200,9 +235,9 @@ update_file_browser :: proc(fb: ^File_Browser) -> (selected: bool, path: string)
         if fb.active_index >= 0 && fb.active_index < i32(len(fb.entries)) {
             entry := fb.entries[fb.active_index]
             if entry.is_dir {
-                navigate_to(fb, entry.full)
+                navigate_to(fb, string(entry.full))
             } else {
-                copy_to_buf(fb.selected_file[:], entry.full)
+                copy_to_buf(fb.selected_file[:], string(entry.full))
                 fb.select_pressed = true
                 fb.active = false
                 return true, buf_to_string(fb.selected_file[:])
@@ -371,9 +406,9 @@ draw_file_browser :: proc(fb: ^File_Browser) {
                 entry := fb.entries[fb.active_index]
 
                 if entry.is_dir {
-                    navigate_to(fb, entry.full)
+                    navigate_to(fb, string(entry.full))
                 } else {
-                    copy_to_buf(fb.selected_file[:], entry.full)
+                    copy_to_buf(fb.selected_file[:], string(entry.full))
                     fb.select_pressed = true
                 }
 
@@ -396,11 +431,11 @@ draw_file_browser :: proc(fb: ^File_Browser) {
         if fb.active_index >= 0 && fb.active_index < i32(len(fb.entries)) {
             entry := fb.entries[fb.active_index]
             if !entry.is_dir {
-                copy_to_buf(fb.selected_file[:], entry.full)
+                copy_to_buf(fb.selected_file[:], string(entry.full))
                 fb.select_pressed = true
             } else {
                 // If directory selected, enter it
-                navigate_to(fb, entry.full)
+                navigate_to(fb, string(entry.full))
             }
         }
     }
@@ -422,15 +457,15 @@ navigate_to :: proc(fb: ^File_Browser, new_path: string) {
 
     // Clean the path a bit
     clean_path := strings.trim_right(new_path, "/\\")
-    
+    cstring_clean_path := strings.clone_to_cstring(clean_path, context.temp_allocator)
     // Make sure it's actually a directory
-    if !rl.DirectoryExists(cstring(raw_data(clean_path))) {
+    if !rl.DirectoryExists(cstring_clean_path) {
         fmt.eprintf("Cannot navigate to: %s (not a directory)\n", clean_path)
         return
     }
 
     // Copy into the fixed buffer + null-terminate
-    copy_to_buf(fb.current_path[:], clean_path)
+    copy_to_buf(fb.current_path[:], string(cstring_clean_path))
 
     // Reset list state
     fb.active_index = -1
@@ -447,7 +482,7 @@ refresh_directory :: proc(fb: ^File_Browser) {
     path_str := buf_to_string(fb.current_path[:])
     if path_str == "" do return
 
-    if !rl.DirectoryExists(cstring(raw_data(path_str))) {
+    if !rl.DirectoryExists(strings.clone_to_cstring(path_str, context.temp_allocator)) {
         return
     }
 
@@ -455,15 +490,15 @@ refresh_directory :: proc(fb: ^File_Browser) {
     filter_str := buf_to_string(fb.filter_ext[:])
 
     if filter_str == "" {
-        list = rl.LoadDirectoryFiles(cstring(raw_data(path_str)))
+        list = rl.LoadDirectoryFiles(strings.clone_to_cstring(path_str, context.temp_allocator))
     } else {
         full_filter := filter_str
         if !strings.contains(filter_str, "DIR") {
             full_filter = strings.concatenate({"DIR;", filter_str}, context.temp_allocator)
         }
         list = rl.LoadDirectoryFilesEx(
-            cstring(raw_data(path_str)),
-            cstring(raw_data(full_filter)),
+            strings.clone_to_cstring(path_str, context.temp_allocator),
+            strings.clone_to_cstring(full_filter, context.temp_allocator),
             false,
         )
     }
@@ -499,7 +534,7 @@ refresh_directory :: proc(fb: ^File_Browser) {
         // Only these two allocations are permanent
         append(&fb.entries, Entry{
             name     = strings.clone(name),   // owned
-            full     = strings.clone(full),   // owned
+            full     = strings.clone_to_cstring(full),   // owned
             is_dir   = is_dir,
             size     = size,
             mod_time = mod_time,
@@ -509,7 +544,7 @@ refresh_directory :: proc(fb: ^File_Browser) {
     // Sort
     slice.sort_by(fb.entries[:], proc(a, b: Entry) -> bool {
         if a.is_dir != b.is_dir do return a.is_dir
-        return a.name < b.name
+        return strings.to_lower(a.name, context.temp_allocator) < strings.to_lower(b.name, context.temp_allocator)
     })
 }
 
